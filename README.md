@@ -5,7 +5,7 @@ A GeoGuessr-style game that runs on your own machine and doesn't touch the Googl
 You're dropped somewhere on Earth in a 360° street view. Look around, read the signs, then pin where you think you are on the map. The closer you are, the more points you get (5,000 max per round).
 
 - **Street view:** [Mapillary](https://www.mapillary.com) imagery through [MapillaryJS](https://github.com/mapillary/mapillary-js) (free token)
-- **Guess map:** [Leaflet](https://leafletjs.com) with [OpenStreetMap](https://www.openstreetmap.org) tiles (no key)
+- **Guess map:** [MapLibre GL](https://maplibre.org) with [OpenFreeMap](https://openfreemap.org) vector tiles (no key). It renders on the GPU, so zooming is smooth and continuous
 - **Sound:** synthesized in the browser with the Web Audio API (no audio files)
 - **Backend:** Go standard library only; the frontend is embedded, so it's one binary
 
@@ -65,7 +65,7 @@ internal/geo       haversine distance and scoring
 internal/mapillary coverage-tile client, random-location finder, seed cities
 internal/mvt       minimal Mapbox Vector Tile decoder (points + properties)
 internal/pool      file-backed location pool
-web/static         HTML / CSS / JS (Leaflet, MapillaryJS, Web Audio)
+web/static         HTML / CSS / JS (MapLibre GL, MapillaryJS, Web Audio)
 ```
 
 **Finding locations.** Mapillary has no "random place" endpoint, so the finder picks a random seed city (around 150 of them, in places with good coverage) and jitters to a random point within the city's radius. It then downloads the zoom-14 **coverage vector tile** under that point (about 2 km across). That's the same tile Mapillary's own map draws its green dots from, and it lists every image there with its ID, position and whether it's a 360° panorama. If the tile has no panoramas it tries another spot, and after a few misses it accepts normal photos too.
@@ -99,5 +99,5 @@ Flags: `-addr` (default `127.0.0.1:8080`) and `-pool` (default `data/locations.j
 
 - You still need internet: imagery and map tiles load online.
 - Coverage depends on what people have uploaded to Mapillary. It's dense in Europe, North America and Japan, and thinner elsewhere. If an image fails to load, there's a **Skip round** button.
-- Imagery is © Mapillary contributors, CC BY-SA. Map data is © OpenStreetMap contributors. Both are credited in the UI.
-- This is meant for personal, local use. OpenStreetMap's public tile servers are fine for that, but don't use them for a deployed app with real traffic.
+- Imagery is © Mapillary contributors, CC BY-SA. The map is OpenFreeMap / © OpenMapTiles, with data © OpenStreetMap contributors. Both are credited in the UI.
+- This is meant for personal, local use. OpenFreeMap is free and donation-funded; if you ever deploy this for real traffic, read their terms or self-host the tiles.

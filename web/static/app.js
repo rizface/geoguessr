@@ -1,4 +1,5 @@
 import { sounds } from "./sounds.js";
+import { makeMap, resetView, makePin, setLines, fitPoints, nearestWrap } from "./maps.js";
 
 // ---------------------------------------------------------------------
 // Setup
@@ -17,9 +18,6 @@ const REGION_LABELS = {
   oceania: "Oceania",
 };
 
-const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-
 const countryNames = (() => {
   try { return new Intl.DisplayNames(["en"], { type: "region" }); } catch { return null; }
 })();
@@ -30,7 +28,7 @@ const state = {
   gameId: null,
   round: null,        // current RoundView from the API
   lastResult: null,   // last GuessResult
-  guess: null,        // L.LatLng of the placed pin
+  guess: null,        // {lng, lat} of the placed pin
   submitting: false,
   timer: null,
   viewer: null,
@@ -92,31 +90,19 @@ function countUp(el, to, ms = 700) {
   requestAnimationFrame(step);
 }
 
-function pinIcon(kind, label) {
-  const labelHtml = label ? `<span class="pin-label">${label}</span>` : "";
-  return L.divIcon({
-    className: "pin-drop",
-    html: `<div class="pin ${kind}"></div>${labelHtml}`,
-    iconSize: [22, 22],
-    iconAnchor: [11, 26],
-  });
+// Leave room for the floating score card when framing results.
+function resultPadding(cardHeight) {
+  const el = document.querySelector(".screen.active");
+  const h = el ? el.clientHeight : window.innerHeight;
+  const bottom = Math.min(cardHeight + 30, Math.max(60, h - 160));
+  return { top: 60, left: 50, right: 60, bottom };
 }
 
-function makeMap(id, opts = {}) {
-  const map = L.map(id, { worldCopyJump: true, minZoom: 1, ...opts }).setView([20, 0], 1);
-  L.tileLayer(TILE_URL, { maxZoom: 19, attribution: TILE_ATTRIBUTION }).addTo(map);
-  // Keep tiles in sync whenever the container changes size.
-  new ResizeObserver(() => map.invalidateSize()).observe(map.getContainer());
-  return map;
+function summaryPadding() {
+  return resultPadding(document.querySelector(".summary-card").offsetHeight);
 }
 
-// Shift `to` by ±360° so a line from `from` takes the short way around.
-function nearestWrap(from, to) {
-  let lng = to.lng;
-  while (lng - from.lng > 180) lng -= 360;
-  while (lng - from.lng < -180) lng += 360;
-  return L.latLng(to.lat, lng);
-}
+const ll = (p) => [p.lng, p.lat];
 
 // ---------------------------------------------------------------------
 // Start screen
@@ -242,8 +228,8 @@ async function showImage(imageId) {
 
 function resetGuessMap() {
   if (!state.maps.guess) {
-    const map = makeMap("guess-map");
-    map.on("click", (e) => placePin(e.latlng));
+    const map = makeMap($("guess-map"));
+    map.on("click", (e) => placePin(e.lngLat));
     state.maps.guess = map;
   }
   const map = state.maps.guess;
@@ -251,19 +237,20 @@ function resetGuessMap() {
     state.maps.guessMarker.remove();
     state.maps.guessMarker = null;
   }
-  map.setView([20, 0], 1);
+  map.resize();
+  resetView(map);
   const btn = $("btn-guess");
   btn.disabled = true;
   btn.textContent = "Place your pin on the map";
 }
 
-function placePin(latlng) {
+function placePin(lngLat) {
   if (state.submitting) return;
-  state.guess = latlng;
+  state.guess = { lng: lngLat.lng, lat: lngLat.lat };
   if (state.maps.guessMarker) {
-    state.maps.guessMarker.setLatLng(latlng);
+    state.maps.guessMarker.setLngLat(ll(state.guess));
   } else {
-    state.maps.guessMarker = L.marker(latlng, { icon: pinIcon("guess") }).addTo(state.maps.guess);
+    state.maps.guessMarker = makePin(state.maps.guess, ll(state.guess), "guess");
   }
   sounds.pin();
   const btn = $("btn-guess");
@@ -296,27 +283,25 @@ function showResult(res) {
   show("screen-result");
 
   if (!state.maps.result) {
-    state.maps.result = makeMap("result-map", { zoomControl: false });
-    L.control.zoom({ position: "topright" }).addTo(state.maps.result);
-    state.maps.resultLayer = L.layerGroup().addTo(state.maps.result);
+    state.maps.result = makeMap($("result-map"));
+    state.maps.resultPins = [];
   }
   const map = state.maps.result;
-  const layer = state.maps.resultLayer;
-  layer.clearLayers();
-  map.invalidateSize();
+  state.maps.resultPins.forEach((m) => m.remove());
+  state.maps.resultPins = [];
+  map.resize();
 
-  const pad = { paddingTopLeft: [50, 50], paddingBottomRight: [50, 300] };
+  const pad = resultPadding(document.querySelector(".result-card").offsetHeight);
   if (res.guess) {
-    const g = L.latLng(res.guess.lat, res.guess.lng);
-    const a = nearestWrap(g, L.latLng(res.actual.lat, res.actual.lng));
-    L.polyline([g, a], { color: "#101a1f", weight: 3, dashArray: "6 8", opacity: 0.8 }).addTo(layer);
-    L.marker(g, { icon: pinIcon("guess") }).addTo(layer);
-    L.marker(a, { icon: pinIcon("truth") }).addTo(layer);
-    map.fitBounds(L.latLngBounds([g, a]), { ...pad, maxZoom: 16 });
+    const g = res.guess;
+    const a = nearestWrap(g, res.actual);
+    setLines(map, [[ll(g), ll(a)]]);
+    state.maps.resultPins.push(makePin(map, ll(g), "guess"), makePin(map, ll(a), "truth"));
+    fitPoints(map, [ll(g), ll(a)], { padding: pad, maxZoom: 16 });
   } else {
-    const a = L.latLng(res.actual.lat, res.actual.lng);
-    L.marker(a, { icon: pinIcon("truth") }).addTo(layer);
-    map.setView(a, 5);
+    setLines(map, []);
+    state.maps.resultPins.push(makePin(map, ll(res.actual), "truth"));
+    fitPoints(map, [ll(res.actual)]);
   }
 
   $("result-eyebrow").textContent = `Round ${res.index + 1} of ${state.round.total}`;
@@ -356,31 +341,30 @@ async function showSummary() {
   show("screen-summary");
 
   if (!state.maps.summary) {
-    state.maps.summary = makeMap("summary-map", { zoomControl: false });
-    L.control.zoom({ position: "topright" }).addTo(state.maps.summary);
-    state.maps.summaryLayer = L.layerGroup().addTo(state.maps.summary);
+    state.maps.summary = makeMap($("summary-map"));
+    state.maps.summaryPins = [];
   }
   const map = state.maps.summary;
-  const layer = state.maps.summaryLayer;
-  layer.clearLayers();
-  map.invalidateSize();
+  state.maps.summaryPins.forEach((m) => m.remove());
+  state.maps.summaryPins = [];
+  map.resize();
 
   const all = [];
+  const lines = [];
   const list = $("summary-rounds");
   list.innerHTML = "";
 
   sum.rounds.forEach((r, i) => {
     const pts = [];
-    let a = L.latLng(r.actual.lat, r.actual.lng);
+    let a = r.actual;
     if (r.guess) {
-      const g = L.latLng(r.guess.lat, r.guess.lng);
-      a = nearestWrap(g, a);
-      L.polyline([g, a], { color: "#101a1f", weight: 2, dashArray: "5 7", opacity: 0.7 }).addTo(layer);
-      L.marker(g, { icon: pinIcon("guess") }).addTo(layer);
-      pts.push(g);
+      a = nearestWrap(r.guess, a);
+      lines.push([ll(r.guess), ll(a)]);
+      state.maps.summaryPins.push(makePin(map, ll(r.guess), "guess"));
+      pts.push(ll(r.guess));
     }
-    L.marker(a, { icon: pinIcon("truth", i + 1) }).addTo(layer);
-    pts.push(a);
+    state.maps.summaryPins.push(makePin(map, ll(a), "truth", i + 1));
+    pts.push(ll(a));
     all.push(...pts);
 
     const li = document.createElement("li");
@@ -392,14 +376,13 @@ async function showSummary() {
       (placeName(r) || "Unknown place") + (r.guess ? ` · ${fmtDistance(r.distanceKm)}` : " · timed out");
     li.addEventListener("click", () => {
       sounds.click();
-      map.flyToBounds(L.latLngBounds(pts), { paddingTopLeft: [50, 50], paddingBottomRight: [50, 420], maxZoom: 14 });
+      fitPoints(map, pts, { padding: summaryPadding(), maxZoom: 14, animate: true });
     });
     list.appendChild(li);
   });
 
-  if (all.length) {
-    map.fitBounds(L.latLngBounds(all), { paddingTopLeft: [50, 50], paddingBottomRight: [50, 420], maxZoom: 12 });
-  }
+  setLines(map, lines, 2);
+  fitPoints(map, all, { padding: summaryPadding(), maxZoom: 12 });
 
   const ratio = sum.totalScore / sum.maxScore;
   $("summary-max").textContent = ` / ${fmtNum(sum.maxScore)}`;
