@@ -39,7 +39,9 @@ func main() {
 	token := os.Getenv("MAPILLARY_TOKEN")
 	var finder game.Finder
 	if token != "" {
-		finder = mapillary.NewFinder(mapillary.NewClient(token), mapillary.DefaultSeeds)
+		f := mapillary.NewFinder(mapillary.NewClient(token), mapillary.DefaultSeeds)
+		f.Log = log
+		finder = f
 	} else {
 		log.Warn("MAPILLARY_TOKEN not set: the street view won't load. Get a free token at https://www.mapillary.com/dashboard/developers")
 	}

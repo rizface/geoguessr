@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -50,6 +51,7 @@ func run(n int, region, poolPath string, workers int, anyImage bool) error {
 	fmt.Printf("pool has %d locations (%d in %s). finding %d more...\n", p.Len(), p.CountRegion(region), region, n)
 
 	finder := mapillary.NewFinder(mapillary.NewClient(token), mapillary.DefaultSeeds)
+	finder.Log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if !anyImage {
 		finder.PanoShare = 1 // panoramas only
 	}

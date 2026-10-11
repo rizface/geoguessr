@@ -1,42 +1,37 @@
-// Package mapillary is a tiny client for the Mapillary Graph API,
-// just enough to find street-level images inside a bounding box.
+// Package mapillary finds street-level images using Mapillary's
+// coverage vector tiles.
+//
+// Why tiles and not the Graph API's /images?bbox= search: bbox search
+// runs a database query per request and regularly times out in dense
+// cities. Coverage tiles are pre-rendered and CDN-served, one request
+// returns every image in a ~2 km square, and it is what Mapillary's own
+// map uses.
 package mapillary
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/rizface/geoguessr/internal/mvt"
 )
 
-// DefaultBaseURL is the Mapillary Graph API root.
-const DefaultBaseURL = "https://graph.mapillary.com"
+// DefaultTilesURL is the coverage tile root.
+const DefaultTilesURL = "https://tiles.mapillary.com/maps/vtp/mly1_public/2"
 
-// MaxBBoxArea is the largest bbox (in square degrees) the /images endpoint accepts.
-const MaxBBoxArea = 0.01
+// ImageZoom is the only zoom level whose tiles carry individual images.
+const ImageZoom = 14
 
 // ErrNoToken is returned when the client has no access token configured.
 var ErrNoToken = errors.New("mapillary: no access token (set MAPILLARY_TOKEN)")
 
-// BBox is a lon/lat bounding box.
-type BBox struct {
-	MinLng, MinLat, MaxLng, MaxLat float64
-}
-
-// Area returns the bbox area in square degrees.
-func (b BBox) Area() float64 { return (b.MaxLng - b.MinLng) * (b.MaxLat - b.MinLat) }
-
-func (b BBox) String() string {
-	f := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
-	return f(b.MinLng) + "," + f(b.MinLat) + "," + f(b.MaxLng) + "," + f(b.MaxLat)
-}
-
-// Image is one Mapillary image with its best-known position.
+// Image is one Mapillary image with its position.
 type Image struct {
 	ID         string
 	Lat, Lng   float64
@@ -44,106 +39,118 @@ type Image struct {
 	CapturedAt time.Time
 }
 
-// Client calls the Mapillary Graph API.
+// Client fetches Mapillary coverage tiles.
 type Client struct {
-	Token   string
-	BaseURL string
-	HTTP    *http.Client
+	Token    string
+	TilesURL string
+	HTTP     *http.Client
 }
 
 // NewClient builds a client with sane defaults.
 func NewClient(token string) *Client {
 	return &Client{
-		Token:   token,
-		BaseURL: DefaultBaseURL,
-		HTTP:    &http.Client{Timeout: 15 * time.Second},
+		Token:    token,
+		TilesURL: DefaultTilesURL,
+		HTTP:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-type geometry struct {
-	Coordinates []float64 `json:"coordinates"` // [lng, lat]
-}
-
-type apiImage struct {
-	ID               string    `json:"id"`
-	ComputedGeometry *geometry `json:"computed_geometry"`
-	Geometry         *geometry `json:"geometry"`
-	IsPano           bool      `json:"is_pano"`
-	CapturedAt       int64     `json:"captured_at"` // unix millis
-}
-
-type apiResponse struct {
-	Data  []apiImage `json:"data"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    int    `json:"code"`
-	} `json:"error"`
-}
-
-// ImagesInBBox lists images inside bbox. When panoOnly is true only
-// 360° panoramas are returned.
-func (c *Client) ImagesInBBox(ctx context.Context, bbox BBox, panoOnly bool, limit int) ([]Image, error) {
+// ImagesInTile returns every image in z14 tile (x, y). An empty slice
+// means the tile has no coverage.
+func (c *Client) ImagesInTile(ctx context.Context, x, y int) ([]Image, error) {
 	if c.Token == "" {
 		return nil, ErrNoToken
 	}
-	if bbox.Area() >= MaxBBoxArea {
-		return nil, fmt.Errorf("mapillary: bbox area %.4f exceeds limit %.2f", bbox.Area(), MaxBBoxArea)
-	}
-
-	q := url.Values{}
-	q.Set("fields", "id,computed_geometry,geometry,is_pano,captured_at")
-	q.Set("bbox", bbox.String())
-	q.Set("limit", strconv.Itoa(limit))
-	if panoOnly {
-		q.Set("is_pano", "true")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/images?"+q.Encode(), nil)
+	// Tiles take the token as a query parameter (per Mapillary's docs);
+	// it never leaves this process except to Mapillary.
+	u := fmt.Sprintf("%s/%d/%d/%d?access_token=%s", c.TilesURL, ImageZoom, x, y, url.QueryEscape(c.Token))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Header auth keeps the token out of URLs and logs.
-	req.Header.Set("Authorization", "OAuth "+c.Token)
 
+	start := time.Now()
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("mapillary: request failed: %w", err)
+		// Strip the URL (and token) from transport errors.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("mapillary: tile %d/%d after %s: %w", x, y, time.Since(start).Round(time.Millisecond), err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, fmt.Errorf("mapillary: read body: %w", err)
+		return nil, fmt.Errorf("mapillary: tile %d/%d: read: %w", x, y, err)
 	}
-
-	var out apiResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("mapillary: HTTP %d, bad JSON: %w", resp.StatusCode, err)
-	}
-	if out.Error != nil {
-		return nil, fmt.Errorf("mapillary: HTTP %d: %s (%s)", resp.StatusCode, out.Error.Message, out.Error.Type)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mapillary: HTTP %d", resp.StatusCode)
-	}
-
-	images := make([]Image, 0, len(out.Data))
-	for _, d := range out.Data {
-		g := d.ComputedGeometry
-		if g == nil || len(g.Coordinates) < 2 {
-			g = d.Geometry
+	switch {
+	case resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound:
+		return nil, nil // no coverage
+	case resp.StatusCode != http.StatusOK:
+		msg := strings.TrimSpace(string(body))
+		if len(msg) > 200 {
+			msg = msg[:200]
 		}
-		if d.ID == "" || g == nil || len(g.Coordinates) < 2 {
+		return nil, fmt.Errorf("mapillary: tile %d/%d: HTTP %d: %s", x, y, resp.StatusCode, msg)
+	}
+
+	layer, err := mvt.DecodeLayer(body, "image")
+	if err != nil {
+		return nil, fmt.Errorf("mapillary: tile %d/%d: %w", x, y, err)
+	}
+	if layer == nil {
+		return nil, nil
+	}
+
+	images := make([]Image, 0, len(layer.Features))
+	for _, f := range layer.Features {
+		id := idString(f.Props["id"])
+		if id == "" || len(f.Points) == 0 {
 			continue
 		}
+		p := f.Points[0]
+		// Skip points in the tile's buffer zone; they belong to a neighbour.
+		if p[0] < 0 || p[1] < 0 || p[0] > float64(layer.Extent) || p[1] > float64(layer.Extent) {
+			continue
+		}
+		lng, lat := mvt.TileToLngLat(ImageZoom, x, y, p[0], p[1], layer.Extent)
+		pano, _ := f.Props["is_pano"].(bool)
 		images = append(images, Image{
-			ID:         d.ID,
-			Lng:        g.Coordinates[0],
-			Lat:        g.Coordinates[1],
-			IsPano:     d.IsPano,
-			CapturedAt: time.UnixMilli(d.CapturedAt),
+			ID:         id,
+			Lat:        lat,
+			Lng:        lng,
+			IsPano:     pano,
+			CapturedAt: time.UnixMilli(toInt64(f.Props["captured_at"])),
 		})
 	}
 	return images, nil
+}
+
+// The docs disagree on whether ids are numbers or strings; accept both.
+func idString(v any) string {
+	switch id := v.(type) {
+	case string:
+		return id
+	case int64:
+		return strconv.FormatInt(id, 10)
+	case uint64:
+		return strconv.FormatUint(id, 10)
+	case float64:
+		return strconv.FormatFloat(id, 'f', 0, 64)
+	}
+	return ""
+}
+
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case uint64:
+		return int64(n)
+	case float64:
+		return int64(n)
+	}
+	return 0
 }

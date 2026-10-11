@@ -145,6 +145,38 @@ func TestFinderFailure(t *testing.T) {
 	}
 }
 
+// limitedFinder succeeds n times, then fails.
+type limitedFinder struct {
+	left atomic.Int64
+}
+
+func (f *limitedFinder) Find(_ context.Context, _ string) (pool.Location, error) {
+	i := f.left.Add(-1)
+	if i < 0 {
+		return pool.Location{}, errors.New("no more")
+	}
+	return pool.Location{ImageID: fmt.Sprintf("lim-%d", i), Lat: 1, Lng: 1}, nil
+}
+
+func TestShorterGameWhenLiveSearchFallsShort(t *testing.T) {
+	f := &limitedFinder{}
+	f.left.Store(6)
+	s := newTestService(t, nil, f)
+	g, err := s.NewGame(context.Background(), Settings{Rounds: 10, Region: "world"})
+	if err != nil {
+		t.Fatalf("want a 6-round game, got err %v", err)
+	}
+	if len(g.Rounds) != 6 {
+		t.Fatalf("rounds = %d, want 6", len(g.Rounds))
+	}
+
+	f.left.Store(4) // under half of 10; fresh pool so saved finds don't help
+	s = newTestService(t, nil, f)
+	if _, err := s.NewGame(context.Background(), Settings{Rounds: 10, Region: "world"}); !errors.Is(err, ErrNoLocations) {
+		t.Fatalf("err = %v, want ErrNoLocations", err)
+	}
+}
+
 func TestSettingsNormalize(t *testing.T) {
 	ok := func(r string) bool { return r == "world" || r == "europe" }
 	s, err := Settings{}.Normalize(ok)

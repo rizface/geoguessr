@@ -24,7 +24,7 @@ const (
 	DefaultRounds = 5
 	MaxTimeLimit  = 600 // seconds
 	gameTTL       = 6 * time.Hour
-	liveWorkers   = 4
+	liveWorkers   = 6
 )
 
 // Errors the HTTP layer maps to status codes.
@@ -138,11 +138,15 @@ func (s *Service) NewGame(ctx context.Context, settings Settings) (*Game, error)
 	if missing := settings.Rounds - len(locs); missing > 0 {
 		live, err := s.findLive(ctx, settings.Region, missing, locs)
 		locs = append(locs, live...)
-		if len(locs) < settings.Rounds {
+		// A slightly shorter game beats no game: accept at least half.
+		if len(locs) < (settings.Rounds+1)/2 {
 			if err == nil {
 				err = errors.New("live search returned too few results")
 			}
 			return nil, fmt.Errorf("%w (%d/%d): %v", ErrNoLocations, len(locs), settings.Rounds, err)
+		}
+		if len(locs) < settings.Rounds {
+			s.log.Warn("starting a shorter game", "wanted", settings.Rounds, "got", len(locs), "err", err)
 		}
 	}
 

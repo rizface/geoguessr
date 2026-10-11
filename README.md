@@ -62,12 +62,15 @@ cmd/server         HTTP server (API + embedded frontend)
 cmd/curate         CLI that fills data/locations.json from Mapillary
 internal/game      game sessions, rounds, guesses
 internal/geo       haversine distance and scoring
-internal/mapillary Graph API client, random-location finder, seed cities
+internal/mapillary coverage-tile client, random-location finder, seed cities
+internal/mvt       minimal Mapbox Vector Tile decoder (points + properties)
 internal/pool      file-backed location pool
 web/static         HTML / CSS / JS (Leaflet, MapillaryJS, Web Audio)
 ```
 
-**Finding locations.** Mapillary has no "random place" endpoint, so the finder picks a random seed city (around 150 of them, weighted towards places with good coverage), jitters to a random point within the city's radius, and asks the Graph API for 360° panoramas in a small box around it. If a box comes up empty it tries another. After a few misses it accepts normal photos too.
+**Finding locations.** Mapillary has no "random place" endpoint, so the finder picks a random seed city (around 150 of them, in places with good coverage) and jitters to a random point within the city's radius. It then downloads the zoom-14 **coverage vector tile** under that point (about 2 km across). That's the same tile Mapillary's own map draws its green dots from, and it lists every image there with its ID, position and whether it's a 360° panorama. If the tile has no panoramas it tries another spot, and after a few misses it accepts normal photos too.
+
+Earlier versions used the Graph API's `/images?bbox=` search instead. It runs a database query per request and regularly times out in dense cities, which made new games hang. Tiles are pre-rendered and CDN-served, so they're fast and reliable. The 50,000-tiles-per-day limit is far more than one person can use.
 
 **No cheating via devtools.** The browser only ever receives the Mapillary image ID for the current round. The real coordinates stay on the server until you guess, and you can't request future rounds.
 
